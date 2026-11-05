@@ -16,11 +16,13 @@
  * the line.
  */
 
-typedef enum { REDIR_IN, REDIR_OUT, REDIR_APPEND } redir_type_t;
+typedef enum { REDIR_IN, REDIR_OUT, REDIR_APPEND, REDIR_DUP } redir_type_t;
 
 typedef struct {
     redir_type_t type;
-    char *file;
+    int fd;     /* the descriptor being redirected */
+    int dup_to; /* for 2>&1 */
+    char *file; /* NULL for REDIR_DUP */
 } redir_t;
 
 /* one atomic command: argv plus its redirections, in the order typed */

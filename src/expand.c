@@ -362,7 +362,8 @@ void expand_command(const command_t *cmd, command_t *out)
     out->redirs = cmd->nredirs ? xrealloc(NULL, (size_t)cmd->nredirs * sizeof *out->redirs) : NULL;
     for (int k = 0; k < cmd->nredirs; k++) {
         out->redirs[k] = cmd->redirs[k];
-        out->redirs[k].file = strict_grammar ? xstrdup(cmd->redirs[k].file) : expand_one(cmd->redirs[k].file);
+        const char *file = cmd->redirs[k].file;
+        out->redirs[k].file = file == NULL ? NULL : strict_grammar ? xstrdup(file) : expand_one(file);
     }
 }
 

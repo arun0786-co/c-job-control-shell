@@ -11,11 +11,14 @@
  * grammar rule and builds the tree while it checks the syntax.
  */
 
-typedef enum { T_NAME, T_PIPE, T_AMP, T_SEMI, T_AND, T_OR, T_IN, T_OUT, T_APPEND, T_END } tok_type_t;
+typedef enum {
+    T_NAME, T_PIPE, T_AMP, T_SEMI, T_AND, T_OR, T_IN, T_OUT, T_APPEND, T_DUP, T_END
+} tok_type_t;
 
 typedef struct {
     tok_type_t type;
     size_t start, end; /* position in the line */
+    int fd, dup_to;    /* for the redirections */
 } token_t;
 
 typedef struct {
@@ -113,7 +116,13 @@ static void tokenize(parser_t *p)
     for (;;) {
         while (s[i] != '\0' && isspace((unsigned char)s[i]))
             i++;
-        token_t t = { T_END, i, i };
+        token_t t = { T_END, i, i, 1, 0 };
+        /* 2> is a redirection only with nothing between the 2 and the >: in
+           echo 2 > f the 2 is an argument */
+        if (!strict_grammar && (s[i] == '1' || s[i] == '2') && s[i + 1] == '>') {
+            t.fd = s[i] - '0';
+            i++;
+        }
         switch (s[i]) {
         case '\0':
             break;
@@ -143,11 +152,15 @@ static void tokenize(parser_t *p)
             }
             break;
         case ';': t.type = T_SEMI; i++; break;
-        case '<': t.type = T_IN; i++; break;
+        case '<': t.type = T_IN; t.fd = 0; i++; break;
         case '>':
             if (s[i + 1] == '>') {
                 t.type = T_APPEND;
                 i += 2;
+            } else if (!strict_grammar && s[i + 1] == '&' && (s[i + 2] == '1' || s[i + 2] == '2')) {
+                t.type = T_DUP;
+                t.dup_to = s[i + 2] - '0';
+                i += 3;
             } else {
                 t.type = T_OUT;
                 i++;
@@ -192,14 +205,24 @@ static int parse_atomic(parser_t *p, command_t *cmd)
             cmd->argv[cmd->argc++] = token_text(p, t);
             cmd->argv[cmd->argc] = NULL;
             p->pos++;
+        } else if (t->type == T_DUP) {
+            cmd->redirs = xrealloc(cmd->redirs, (size_t)(cmd->nredirs + 1) * sizeof *cmd->redirs);
+            redir_t *r = &cmd->redirs[cmd->nredirs++];
+            r->type = REDIR_DUP;
+            r->fd = t->fd;
+            r->dup_to = t->dup_to;
+            r->file = NULL;
+            p->pos++;
         } else if (t->type == T_IN || t->type == T_OUT || t->type == T_APPEND) {
             /* t is not T_END, so a next token always exists */
             token_t *name = &p->toks[p->pos + 1];
             if (name->type != T_NAME)
                 return 0;
-            cmd->redirs = xrealloc(cmd->redirs, (cmd->nredirs + 1) * sizeof *cmd->redirs);
+            cmd->redirs = xrealloc(cmd->redirs, (size_t)(cmd->nredirs + 1) * sizeof *cmd->redirs);
             redir_t *r = &cmd->redirs[cmd->nredirs++];
             r->type = t->type == T_IN ? REDIR_IN : t->type == T_OUT ? REDIR_OUT : REDIR_APPEND;
+            r->fd = t->fd;
+            r->dup_to = 0;
             r->file = token_text(p, name);
             p->pos += 2;
         } else {

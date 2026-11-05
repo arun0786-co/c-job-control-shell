@@ -49,16 +49,19 @@ static char *trim(const char *s)
     return xstrndup(s, n);
 }
 
-/* open each redirection in the order typed and point fd 0 or 1 at it, so
-   the last one of each kind wins. stops at the first file that fails. */
+/* apply each redirection in the order typed, so the last one of each kind
+   wins and 2>&1 > f is not > f 2>&1. stops at the first file that fails. */
 int apply_redirections(const command_t *cmd)
 {
     for (int i = 0; i < cmd->nredirs; i++) {
         const redir_t *r = &cmd->redirs[i];
-        int fd, target;
+        if (r->type == REDIR_DUP) {
+            dup2(r->dup_to, r->fd);
+            continue;
+        }
+        int fd;
         if (r->type == REDIR_IN) {
             fd = open(r->file, O_RDONLY);
-            target = STDIN_FILENO;
             if (fd < 0) {
                 fprintf(stderr, "No such file or directory\n");
                 return -1;
@@ -66,14 +69,13 @@ int apply_redirections(const command_t *cmd)
         } else {
             int flags = O_WRONLY | O_CREAT | (r->type == REDIR_APPEND ? O_APPEND : O_TRUNC);
             fd = open(r->file, flags, 0644);
-            target = STDOUT_FILENO;
             if (fd < 0) {
                 fprintf(stderr, "Unable to create file for writing\n");
                 return -1;
             }
         }
-        if (fd != target) {
-            dup2(fd, target);
+        if (fd != r->fd) {
+            dup2(fd, r->fd);
             close(fd);
         }
     }
@@ -89,14 +91,17 @@ static int run_builtin_here(const command_t *cmd, builtin_fn fn)
     fflush(stdout);
     int saved_in = dup(STDIN_FILENO);
     int saved_out = dup(STDOUT_FILENO);
+    int saved_err = dup(STDERR_FILENO);
     if (apply_redirections(cmd) == 0) {
         status = fn != NULL ? fn(cmd->argc, cmd->argv) : 0;
         fflush(stdout);
     }
     dup2(saved_in, STDIN_FILENO);
     dup2(saved_out, STDOUT_FILENO);
+    dup2(saved_err, STDERR_FILENO);
     close(saved_in);
     close(saved_out);
+    close(saved_err);
     return status;
 }
 
