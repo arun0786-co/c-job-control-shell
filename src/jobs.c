@@ -187,6 +187,16 @@ int wait_foreground(job_t *job, int resume)
     return job->stopped;
 }
 
+/* the number a finished job gives to $? */
+int job_exit_status(const job_t *job)
+{
+    if (job->stopped)
+        return 128 + SIGTSTP;
+    if (WIFSIGNALED(job->last_status))
+        return 128 + WTERMSIG(job->last_status);
+    return WEXITSTATUS(job->last_status);
+}
+
 /* collect status changes of background jobs without blocking, and report
    the jobs that have finished */
 void jobs_check(void)
@@ -236,6 +246,15 @@ void jobs_kill_all(void)
 static int by_text(const void *a, const void *b)
 {
     return strcmp((*(job_t *const *)a)->text, (*(job_t *const *)b)->text);
+}
+
+/* a forked copy of the shell becomes one background job */
+void job_start_background(job_t *job, pid_t pid)
+{
+    job->pgid = pid;
+    job->pids[job->npids++] = pid;
+    job->live = 1;
+    job_add(job);
 }
 
 int builtin_activities(int argc, char **argv)
@@ -297,11 +316,12 @@ int builtin_fg(int argc, char **argv)
     fflush(stdout);
     if (wait_foreground(job, job->stopped)) {
         printf("[%d] Stopped %s\n", job->number, job->text);
-        return 1;
+        return job_exit_status(job);
     }
+    int status = job_exit_status(job);
     job_remove(job);
     job_free(job);
-    return 0;
+    return status;
 }
 
 int builtin_bg(int argc, char **argv)

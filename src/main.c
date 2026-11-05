@@ -3,10 +3,20 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
-int main(void)
+int main(int argc, char **argv)
 {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--strict") == 0) {
+            strict_grammar = 1;
+        } else {
+            fprintf(stderr, "usage: %s [--strict]\n", argv[0]);
+            return 2;
+        }
+    }
+
     /* line buffering even when stdout is a pipe, so the shell's output and
        its children's output come out in order */
     setvbuf(stdout, NULL, _IOLBF, 0);

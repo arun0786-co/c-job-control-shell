@@ -11,7 +11,7 @@
  * grammar rule and builds the tree while it checks the syntax.
  */
 
-typedef enum { T_NAME, T_PIPE, T_AMP, T_SEMI, T_IN, T_OUT, T_APPEND, T_END } tok_type_t;
+typedef enum { T_NAME, T_PIPE, T_AMP, T_SEMI, T_AND, T_OR, T_IN, T_OUT, T_APPEND, T_END } tok_type_t;
 
 typedef struct {
     tok_type_t type;
@@ -41,8 +41,24 @@ static void tokenize(parser_t *p)
         switch (s[i]) {
         case '\0':
             break;
-        case '|': t.type = T_PIPE; i++; break;
-        case '&': t.type = T_AMP; i++; break;
+        case '|':
+            if (s[i + 1] == '|' && !strict_grammar) {
+                t.type = T_OR;
+                i += 2;
+            } else {
+                t.type = T_PIPE;
+                i++;
+            }
+            break;
+        case '&':
+            if (s[i + 1] == '&' && !strict_grammar) {
+                t.type = T_AND;
+                i += 2;
+            } else {
+                t.type = T_AMP;
+                i++;
+            }
+            break;
         case ';': t.type = T_SEMI; i++; break;
         case '<': t.type = T_IN; i++; break;
         case '>':
@@ -120,27 +136,40 @@ static int parse_group(parser_t *p, group_t *g)
         p->pos++;
     }
     size_t end = p->toks[p->pos - 1].end;
+    g->start = start;
+    g->end = end;
     g->text = xstrndup(p->line + start, end - start);
     return 1;
 }
 
-/* shell_cmd -> cmd_group ((& | ;) cmd_group)* &? */
+/* shell_cmd -> and_or ((& | ;) and_or)* (& | ;)?
+   and_or    -> cmd_group ((&& | "||") cmd_group)*
+   The groups stay in one flat list. Each says what must have happened for it
+   to run, and that is enough to find where an and_or begins and ends. */
 static int parse_shell_cmd(parser_t *p, shell_cmd_t *sc)
 {
+    run_if_t run_if = RUN_ALWAYS;
     for (;;) {
         sc->groups = xrealloc(sc->groups, (sc->ngroups + 1) * sizeof *sc->groups);
         group_t *g = &sc->groups[sc->ngroups++];
         memset(g, 0, sizeof *g);
+        g->run_if = run_if;
         if (!parse_group(p, g))
             return 0;
         tok_type_t op = peek(p)->type;
+        if (op == T_AND || op == T_OR) {
+            p->pos++;
+            run_if = op == T_AND ? RUN_IF_OK : RUN_IF_FAILED;
+            continue;
+        }
         if (op != T_SEMI && op != T_AMP)
             break;
         p->pos++;
+        run_if = RUN_ALWAYS;
         g->background = op == T_AMP;
-        /* only & may end the line; a trailing ; leaves the loop needing
-           another cmd_group, which fails */
-        if (op == T_AMP && peek(p)->type == T_END)
+        /* the course's grammar lets only & end the line: a trailing ; leaves
+           the loop needing another cmd_group, which fails */
+        if ((op == T_AMP || !strict_grammar) && peek(p)->type == T_END)
             break;
     }
     return peek(p)->type == T_END;
@@ -162,6 +191,7 @@ int parse_line(const char *line, shell_cmd_t **out)
         free_shell_cmd(sc);
         return -1;
     }
+    sc->line = xstrdup(line);
     *out = sc;
     return 1;
 }
@@ -183,5 +213,6 @@ void free_shell_cmd(shell_cmd_t *sc)
         free(g->text);
     }
     free(sc->groups);
+    free(sc->line);
     free(sc);
 }

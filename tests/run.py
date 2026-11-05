@@ -24,8 +24,52 @@ def test_commands():
 
 def test_syntax():
     box = Sandbox()
-    for bad in ["| ls", "ls |", "ls ; ", "ls < ", "ls > > f", "ls < > f", "; ls", "& ls", "ls && ", "|| ls"]:
+    for bad in ["| ls", "ls |", "ls < ", "ls > > f", "ls < > f", "; ls", "& ls", "ls && ", "|| ls",
+                "ls && && ls", "ls || | ls", "ls ; ; ls", "ls & & ls"]:
         same(f"rejects {bad!r}", piped(box, bad)[1], "Invalid Syntax!\n")
+    box.close()
+
+
+def test_strict():
+    box = Sandbox()
+    strict = {"args": ["--strict"]}
+    for bad in ["ls ; ", "echo a && echo b", "echo a || echo b"]:
+        same(f"strict rejects {bad!r}", piped(box, bad, **strict)[1], "Invalid Syntax!\n")
+    same("strict allows a final &", piped(box, "true &", **strict)[1], "")
+    box.close()
+
+
+def test_and_or():
+    box = Sandbox()
+    same("&& after success", piped(box, "true && echo yes")[0], "yes\n")
+    same("&& after failure", piped(box, "false && echo yes")[0], "")
+    same("|| after failure", piped(box, "false || echo yes")[0], "yes\n")
+    same("|| after success", piped(box, "true || echo yes")[0], "")
+    same("a skipped group keeps the status", piped(box, "false && echo a || echo b")[0], "b\n")
+    same("and then or", piped(box, "true && echo a || echo b")[0], "a\n")
+    same("; starts again", piped(box, "false && echo a ; echo b")[0], "b\n")
+    same("the pipe's last command decides", piped(box, "false | true && echo yes")[0], "yes\n")
+    same("not found counts as failure", piped(box, "no_such_x || echo no")[0], "no\n")
+    same("builtins give a status", piped(box, "hop nowhere || echo no")[0], "no\n")
+    same("a trailing ; is fine", piped(box, "echo a ;")[0], "a\n")
+    os.makedirs(box.path("d"))
+    same("&& with a builtin in this shell", piped(box, "hop d && pwd")[0], box.path("d") + "\n")
+    out = piped(box, "true && sleep 0.2 &", "activities", "sleep 0.5", "echo end")[0]
+    check("and-or in the background is one job", re.search(r"^\[1\] \d+$", out, re.M), out)
+    check("it has the whole text", "true && sleep 0.2 - Running" in out, out)
+    check("and it finishes", "true && sleep 0.2 with pid" in out and "exited normally" in out, out)
+    same("no wait for it", piped(box, "sleep 5 && echo late &", "echo first", timeout=3)[0].split("\n")[1], "first")
+    t = Term(box)
+    t.wait_prompt()
+    t.run("sleep 50 && echo after &")
+    out = t.run("activities")
+    check("background and-or listed", "sleep 50 && echo after - Running" in out, out)
+    pid = re.search(r"\[(\d+)\] : sleep 50", out).group(1)
+    t.run(f"ping {pid} 9")
+    time.sleep(0.2)
+    out = t.run("true")
+    check("killing it ends all of it", "exited abnormally" in out and "after" not in out.replace("echo after", ""), out)
+    t.close()
     box.close()
 
 

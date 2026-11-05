@@ -5,11 +5,15 @@
 #include <termios.h>
 
 /*
- * Parse tree for one line of input, following the grammar in the spec:
+ * Parse tree for one line of input:
  *
- *   shell_cmd -> cmd_group ((& | ;) cmd_group)* &?
+ *   shell_cmd -> and_or ((& | ;) and_or)* (& | ;)?
+ *   and_or    -> cmd_group ((&& | "||") cmd_group)*
  *   cmd_group -> atomic (| atomic)*
  *   atomic    -> name (name | input | output)*
+ *
+ * With --strict the grammar is the course's: no && or ||, and only & may end
+ * the line.
  */
 
 typedef enum { REDIR_IN, REDIR_OUT, REDIR_APPEND } redir_type_t;
@@ -27,18 +31,26 @@ typedef struct {
     int nredirs;
 } command_t;
 
+typedef enum { RUN_ALWAYS, RUN_IF_OK, RUN_IF_FAILED } run_if_t;
+
 /* commands joined by pipes */
 typedef struct {
     command_t *cmds;
     int ncmds;
-    int background; /* followed by & */
-    char *text;     /* the group as typed, used as the job's name */
+    run_if_t run_if; /* came after nothing, && or || */
+    int background;  /* followed by & */
+    size_t start, end; /* where it is in the line */
+    char *text;      /* the group as typed, used as the job's name */
 } group_t;
 
 typedef struct {
     group_t *groups;
     int ngroups;
+    char *line;
 } shell_cmd_t;
+
+extern int strict_grammar; /* --strict: only what the course's grammar allows */
+extern int last_status;    /* of the last command; $? */
 
 /* util.c */
 void *xrealloc(void *p, size_t n);
@@ -89,6 +101,8 @@ int wait_foreground(job_t *job, int resume);
 void reset_child_signals(void);
 void jobs_check(void);
 void jobs_kill_all(void);
+int job_exit_status(const job_t *job);
+void job_start_background(job_t *job, pid_t pid);
 int builtin_activities(int argc, char **argv);
 int builtin_ping(int argc, char **argv);
 int builtin_fg(int argc, char **argv);

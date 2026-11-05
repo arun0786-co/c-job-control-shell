@@ -6,7 +6,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+int strict_grammar;
+int last_status;
+
+/* a forked copy of the shell puts what it runs in this group, not in new ones */
+static pid_t subshell_pgid;
 
 /* lines that run log anywhere are not stored in the history */
 static int mentions_log(const shell_cmd_t *sc)
@@ -62,19 +69,21 @@ int apply_redirections(const command_t *cmd)
 /* a builtin alone in a foreground group runs inside the shell, so that
    hop can change the shell's own directory. its redirections are undone
    afterwards. */
-static void run_builtin_here(const command_t *cmd, builtin_fn fn)
+static int run_builtin_here(const command_t *cmd, builtin_fn fn)
 {
+    int status = 1;
     fflush(stdout);
     int saved_in = dup(STDIN_FILENO);
     int saved_out = dup(STDOUT_FILENO);
     if (apply_redirections(cmd) == 0) {
-        fn(cmd->argc, cmd->argv);
+        status = fn(cmd->argc, cmd->argv);
         fflush(stdout);
     }
     dup2(saved_in, STDIN_FILENO);
     dup2(saved_out, STDOUT_FILENO);
     close(saved_in);
     close(saved_out);
+    return status;
 }
 
 /* runs in the child after fork and never returns */
@@ -128,6 +137,7 @@ static void exec_command(const command_t *cmd, int in_fd, int out_fd, pid_t pgid
 static job_t *launch(const group_t *g)
 {
     job_t *job = job_new(g->text, g->ncmds);
+    job->pgid = subshell_pgid;
     int in_fd = STDIN_FILENO;
     for (int i = 0; i < g->ncmds; i++) {
         int pfd[2] = { -1, -1 };
@@ -173,29 +183,91 @@ static job_t *launch(const group_t *g)
     return job;
 }
 
-static void run_group(const group_t *g)
+static int run_group(const group_t *g)
 {
     builtin_fn fn = g->ncmds == 1 ? find_builtin(g->cmds[0].argv[0]) : NULL;
-    if (fn != NULL && !g->background) {
-        run_builtin_here(&g->cmds[0], fn);
-        return;
-    }
+    if (fn != NULL && !g->background)
+        return run_builtin_here(&g->cmds[0], fn);
     job_t *job = launch(g);
     if (job->npids == 0) {
         job_free(job);
-        return;
+        return 1;
     }
     if (g->background) {
         job_add(job);
         printf("[%d] %d\n", job->number, (int)job->pgid);
-        return;
+        return 0;
     }
+    int status;
     if (wait_foreground(job, 0)) {
+        status = job_exit_status(job);
         job_add(job);
         printf("[%d] Stopped %s\n", job->number, job->text);
     } else {
+        status = job_exit_status(job);
         job_free(job);
     }
+    return status;
+}
+
+/* run groups first to last of one and_or, each only if the status so far
+   allows it. a skipped group leaves the status alone, so that in
+   false && a || b, b runs. */
+static void run_and_or(const shell_cmd_t *sc, int first, int last)
+{
+    for (int i = first; i <= last; i++) {
+        const group_t *g = &sc->groups[i];
+        if (g->run_if == RUN_IF_OK && last_status != 0)
+            continue;
+        if (g->run_if == RUN_IF_FAILED && last_status == 0)
+            continue;
+        last_status = run_group(g);
+    }
+}
+
+/* a && b & puts the whole of a && b in the background. No one group can stand
+   for it, so a forked copy of the shell runs it and is the job. */
+static void run_and_or_background(const shell_cmd_t *sc, int first, int last)
+{
+    size_t start = sc->groups[first].start, end = sc->groups[last].end;
+    char *text = xstrndup(sc->line + start, end - start);
+    job_t *job = job_new(text, 1);
+    free(text);
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        job_free(job);
+        last_status = 1;
+        return;
+    }
+    if (pid == 0) {
+        setpgid(0, 0);
+        reset_child_signals();
+        if (!interactive) {
+            int fd = open("/dev/null", O_RDONLY);
+            if (fd >= 0) {
+                dup2(fd, STDIN_FILENO);
+                close(fd);
+            }
+        }
+        interactive = 0;
+        in_child_shell = 1;
+        subshell_pgid = getpid();
+        /* the last group's background flag is what brought us here */
+        shell_cmd_t copy = *sc;
+        group_t *groups = xrealloc(NULL, (size_t)sc->ngroups * sizeof *groups);
+        memcpy(groups, sc->groups, (size_t)sc->ngroups * sizeof *groups);
+        groups[last].background = 0;
+        copy.groups = groups;
+        run_and_or(&copy, first, last);
+        fflush(stdout);
+        _exit(last_status);
+    }
+    setpgid(pid, pid);
+    job_start_background(job, pid);
+    printf("[%d] %d\n", job->number, (int)job->pgid);
+    last_status = 0;
 }
 
 void run_line(const char *line, int store_in_history)
@@ -204,6 +276,7 @@ void run_line(const char *line, int store_in_history)
     int r = parse_line(line, &sc);
     if (r < 0) {
         fprintf(stderr, "Invalid Syntax!\n");
+        last_status = 2;
         return;
     }
     if (r == 0)
@@ -213,7 +286,16 @@ void run_line(const char *line, int store_in_history)
         history_add(t);
         free(t);
     }
-    for (int i = 0; i < sc->ngroups; i++)
-        run_group(&sc->groups[i]);
+    int first = 0;
+    while (first < sc->ngroups) {
+        int last = first;
+        while (last + 1 < sc->ngroups && sc->groups[last + 1].run_if != RUN_ALWAYS)
+            last++;
+        if (last > first && sc->groups[last].background)
+            run_and_or_background(sc, first, last);
+        else
+            run_and_or(sc, first, last);
+        first = last + 1;
+    }
     free_shell_cmd(sc);
 }
