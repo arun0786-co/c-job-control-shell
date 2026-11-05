@@ -178,6 +178,42 @@ def test_job_control():
     box.close()
 
 
+def test_terminal_modes():
+    box = Sandbox()
+    box.write("noecho.py", """
+import os, signal, sys, termios
+m = termios.tcgetattr(0)
+m[3] &= ~termios.ECHO
+termios.tcsetattr(0, termios.TCSANOW, m)
+print("echo is off", flush=True)
+os.kill(os.getpid(), signal.SIGSTOP)
+print("echo on" if termios.tcgetattr(0)[3] & termios.ECHO else "still off", flush=True)
+""")
+    box.write("diesilent.py", """
+import os, signal, termios
+m = termios.tcgetattr(0)
+m[3] &= ~termios.ECHO
+termios.tcsetattr(0, termios.TCSANOW, m)
+os.kill(os.getpid(), signal.SIGKILL)
+""")
+    t = Term(box)
+    t.wait_prompt()
+    t.send("python3 noecho.py\n")
+    check("a stopped job reports", t.wait_for("Stopped python3 noecho.py"), t.since())
+    t.wait_prompt()
+    modes = t.run("stty -a")
+    check("the shell gets its modes back", re.search(r"(?<![-\w])echo\b", modes), modes)
+    check("the job gets its modes back on fg", "still off" in t.run("fg"), t.since())
+    check("a job that exits keeps its change", re.search(r"-echo\b", t.run("stty -a")), t.since())
+    t.run("stty echo")
+    t.send("python3 diesilent.py\n")
+    t.wait_prompt()
+    modes = t.run("stty -a")
+    check("a killed job's modes are undone", re.search(r"(?<![-\w])echo\b", modes), modes)
+    t.close()
+    box.close()
+
+
 def main():
     if len(sys.argv) > 1:
         h.only = sys.argv[1]

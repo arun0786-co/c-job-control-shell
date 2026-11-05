@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 /*
@@ -20,6 +21,7 @@
 int interactive;
 int in_child_shell;
 static pid_t shell_pgid;
+static struct termios shell_modes;
 static volatile sig_atomic_t fg_pgid; /* foreground job's group, 0 if none */
 static job_t **jobs;
 static int njobs;
@@ -55,8 +57,10 @@ void jobs_init(void)
     set_handler(SIGTTOU, SIG_IGN);
     set_handler(SIGTTIN, SIG_IGN);
     shell_pgid = getpgrp();
-    if (interactive)
+    if (interactive) {
         tcsetpgrp(STDIN_FILENO, shell_pgid);
+        tcgetattr(STDIN_FILENO, &shell_modes);
+    }
 }
 
 /* called in a child before exec: handlers are reset by exec anyway, but
@@ -143,8 +147,12 @@ static void record(job_t *job, pid_t pid, int status)
 int wait_foreground(job_t *job, int resume)
 {
     fg_pgid = job->pgid;
-    if (interactive)
+    if (interactive) {
+        /* a job that stopped gets back the terminal modes it had then */
+        if (resume && job->has_modes)
+            tcsetattr(STDIN_FILENO, TCSADRAIN, &job->modes);
         tcsetpgrp(STDIN_FILENO, job->pgid);
+    }
     if (resume)
         kill(-job->pgid, SIGCONT);
     job->stopped = 0;
@@ -160,8 +168,22 @@ int wait_foreground(job_t *job, int resume)
         record(job, pid, status);
     }
     fg_pgid = 0;
-    if (interactive)
+    if (interactive) {
         tcsetpgrp(STDIN_FILENO, shell_pgid);
+        if (job->stopped) {
+            /* an editor stopped with Ctrl-Z has echo off; keep its modes for
+               fg, and give the shell its own back */
+            tcgetattr(STDIN_FILENO, &job->modes);
+            job->has_modes = 1;
+            tcsetattr(STDIN_FILENO, TCSADRAIN, &shell_modes);
+        } else if (WIFSIGNALED(job->last_status)) {
+            /* it could not clean up after itself */
+            tcsetattr(STDIN_FILENO, TCSADRAIN, &shell_modes);
+        } else {
+            /* it chose to change them: this is how stty works */
+            tcgetattr(STDIN_FILENO, &shell_modes);
+        }
+    }
     return job->stopped;
 }
 
@@ -169,6 +191,11 @@ int wait_foreground(job_t *job, int resume)
    the jobs that have finished */
 void jobs_check(void)
 {
+    /* A builtin in a pipe runs in a forked copy of the shell. The copy has the
+       job list, but the jobs are its siblings: waitpid fails with ECHILD, which
+       below means "all gone". Only the real shell may decide that. */
+    if (in_child_shell)
+        return;
     for (int i = 0; i < njobs; i++) {
         job_t *job = jobs[i];
         while (job->live > 0) {
@@ -197,11 +224,6 @@ void jobs_check(void)
 
 void jobs_kill_all(void)
 {
-    /* A builtin in a pipe runs in a forked copy of the shell. The copy has the
-       job list, but the jobs are its siblings: waitpid fails with ECHILD, which
-       below means "all gone". Only the real shell may decide that. */
-    if (in_child_shell)
-        return;
     for (int i = 0; i < njobs; i++) {
         kill(-jobs[i]->pgid, SIGKILL);
         job_free(jobs[i]);
@@ -263,7 +285,7 @@ static job_t *job_from_args(int argc, char **argv)
 int builtin_fg(int argc, char **argv)
 {
     if (in_child_shell) {
-        fprintf(stderr, "bg: no job control in a pipe or background group\n");
+        fprintf(stderr, "fg: no job control in a pipe or background group\n");
         return 1;
     }
     job_t *job = job_from_args(argc, argv);
@@ -285,7 +307,7 @@ int builtin_fg(int argc, char **argv)
 int builtin_bg(int argc, char **argv)
 {
     if (in_child_shell) {
-        fprintf(stderr, "fg: no job control in a pipe or background group\n");
+        fprintf(stderr, "bg: no job control in a pipe or background group\n");
         return 1;
     }
     job_t *job = job_from_args(argc, argv);

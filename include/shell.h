@@ -2,6 +2,7 @@
 #define SHELL_H
 
 #include <sys/types.h>
+#include <termios.h>
 
 /*
  * Parse tree for one line of input, following the grammar in the spec:
@@ -70,6 +71,8 @@ typedef struct {
     int live;        /* processes not reaped yet */
     int last_status; /* wait status of the last command in the pipeline */
     int stopped;
+    struct termios modes; /* terminal modes when it last stopped */
+    int has_modes;
     char *text;
 } job_t;
 
