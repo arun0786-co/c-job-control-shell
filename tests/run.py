@@ -95,6 +95,226 @@ def test_scripts():
     box.close()
 
 
+def editing(box, **kw):
+    t = Term(box, **kw)
+    t.wait_prompt()
+    prompt, col = t.screen()
+    return t, col
+
+
+def test_edit_keys():
+    box = Sandbox()
+    t, p = editing(box)
+    def typed(keys, want_text, want_col=None, name=None):
+        t.send(keys)
+        text, col = t.screen()
+        same(name or f"keys {keys!r}", text[p:], want_text)
+        if want_col is not None:
+            same((name or f"keys {keys!r}") + " cursor", col - p, want_col)
+    typed("hello", "hello", 5, "typing")
+    typed("\x1b[D\x1b[D", "hello", 3, "left arrow")
+    typed("XY", "helXYlo", 5, "insert in the middle")
+    typed("\x7f", "helXlo", 4, "backspace")
+    typed("\x1b[C", "helXlo", 5, "right arrow")
+    typed("\x01", "helXlo", 0, "ctrl-a")
+    typed("\x05", "helXlo", 6, "ctrl-e")
+    typed("\x1b[H", "helXlo", 0, "home")
+    typed("\x1b[F", "helXlo", 6, "end")
+    typed("\x1b[H\x1b[3~", "elXlo", 0, "delete")
+    typed("\x04", "lXlo", 0, "ctrl-d deletes")
+    typed("\x05 two three", "lXlo two three", None, "more")
+    typed("\x17", "lXlo two ", 9, "ctrl-w")
+    typed("\x1bb", "lXlo two ", 5, "alt-b")
+    typed("\x1bf", "lXlo two ", 8, "alt-f")
+    typed("\x1b[1;5D", "lXlo two ", 5, "ctrl-left")
+    typed("\x0b", "lXlo ", 5, "ctrl-k")
+    typed("\x15", "", 0, "ctrl-u")
+    typed("\x1b[D", "", 0, "left at the start")
+    typed("\x7f", "", 0, "backspace at the start")
+    typed("\x1b[C", "", 0, "right at the end")
+    typed("héllo", "héllo", 5, "utf-8 counts as one column")
+    typed("\x1b[D\x1b[D\x1b[D\x1b[D", "héllo", 1, "left over utf-8")
+    typed("\x1b[C\x7f", "hllo", 1, "backspace over utf-8")
+    t.send("\x15")
+    t.screen()
+    check("the line runs", "abc" in t.run("echo abc"), t.since())
+    t.send("echo a\x03")
+    text, col = t.screen()
+    same("ctrl-c abandons the line", text[p:], "")
+    check("and shows it did", "^C" in t.out)
+    t.send("\x1bq")
+    text, _ = t.screen()
+    same("an unknown alt key does nothing", text[p:], "")
+    t.send("\x15\x0c")
+    check("ctrl-l clears", t.wait_for("\x1b[2J"))
+    t.close()
+    t = Term(box, cols=30)
+    t.wait_prompt()
+    long = "echo " + "x" * 200
+    t.send(long)
+    t.pump(0.3)
+    check("a long line does not break", t.pump(0.05))
+    out = t.run("")
+    check("a long line runs whole", "x" * 200 in out, out)
+    t.close()
+    box.close()
+
+
+def test_edit_history():
+    box = Sandbox()
+    t, p = editing(box)
+    for line in ["echo first", "echo second", "echo third"]:
+        t.run(line)
+    t.send("draft")
+    t.screen()
+    def key(k, want, name):
+        t.send(k)
+        same(name, t.screen()[0][p:], want)
+    key("\x1b[A", "echo third", "up")
+    key("\x1b[A", "echo second", "up again")
+    key("\x10", "echo first", "ctrl-p")
+    key("\x1b[A", "echo first", "up at the oldest")
+    key("\x1b[B", "echo second", "down")
+    key("\x0e", "echo third", "ctrl-n")
+    key("\x1b[B", "draft", "down returns to the draft")
+    key("\x1b[B", "draft", "down at the draft")
+    t.send("\x15")
+    t.screen()
+    key("\x1b[A\x1b[A", "echo second", "up twice")
+    check("an old line can run", "second" in t.run(""), t.since())
+    t.send("\x12sec")
+    text = t.screen()[0]
+    check("ctrl-r finds it", "(search)'sec': echo second" in text, text)
+    t.send("\x7f\x7f\x7f")
+    text = t.screen()[0]
+    check("ctrl-r backspace", "(search)'': " in text, text)
+    t.send("ir")
+    text = t.screen()[0]
+    check("ctrl-r narrows", "(search)'ir': echo third" in text, text)
+    t.send("\x12")
+    text = t.screen()[0]
+    check("ctrl-r again goes older", "(search)'ir': echo first" in text, text)
+    t.send("\x07")
+    same("ctrl-g gives up", t.screen()[0][p:], "")
+    t.send("\x12thi\r")
+    check("enter runs the match", t.wait_for("third"), t.since())
+    t.wait_prompt()
+    t.send("\x12sec\x1b[D")
+    t.pump(0.2)
+    same("an arrow keeps it to edit", t.screen()[0][p:], "echo second")
+    t.send("\x15")
+    t.close()
+    t, p = editing(box)
+    t.send("\x1b[A")
+    same("history survives a restart", t.screen()[0][p:], "echo third")
+    t.close()
+    lines = [f"echo {i}" for i in range(30)]
+    piped(box, "log purge", *lines)
+    same("log still shows 15", piped(box, "log")[0].splitlines(), lines[15:])
+    t, p = editing(box)
+    t.send("\x1b[A" * 30)
+    same("the editor reaches further", t.screen()[0][p:], "echo 0")
+    t.close()
+    box.close()
+
+
+def test_edit_jobs():
+    box = Sandbox()
+    t, p = editing(box)
+    t.send("sleep 100\n")
+    time.sleep(0.3)
+    t.send("\x1a")
+    check("ctrl-z reaches the job", t.wait_for("Stopped sleep 100"), t.out[-200:])
+    t.wait_prompt()
+    t.send("\x1a")
+    text = t.screen()[0]
+    same("ctrl-z at the prompt does nothing", text[p:], "")
+    t.send("fg\n")
+    time.sleep(0.3)
+    t.send("\x03")
+    check("ctrl-c reaches the job", t.wait_prompt(), t.since())
+    modes = t.run("stty -a")
+    check("programs get a normal terminal", re.search(r"(?<![-\w])icanon\b", modes), modes)
+    t.send("\x04")
+    code = t.wait_exit()
+    check("ctrl-d on an empty line logs out", "logout" in t.out and code == 0, code)
+    t.close()
+    box.close()
+
+
+def test_completion():
+    box = Sandbox()
+    os.makedirs(box.path("src/deep"))
+    box.write("src/alpha.c", ""); box.write("src/beta.c", ""); box.write("readme.md", "")
+    box.write("two words.txt", ""); box.write(".secret", "")
+    box.write("bin/zzmytool", "#!/bin/sh\necho ran-my-tool\n")
+    os.chmod(box.path("bin/zzmytool"), 0o755)
+    box.write("bin/zzother", "")
+    box.env["PATH"] = box.path("bin") + ":" + box.env["PATH"]
+    box.env["ZQVAR"] = "1"
+    t, p = editing(box)
+    def tab(text, want, name):
+        t.send("\x15" + text + "\t")
+        same(name, t.screen()[0][p:], want)
+    tab("zzm", "zzmytool ", "a program")
+    tab("zzo", "zzo", "not executable")
+    tab("activ", "activities ", "a builtin")
+    tab("export Z", "export Z", "unknown leaves it")
+    tab("cat rea", "cat readme.md ", "a file")
+    tab("cat sr", "cat src/", "a directory gets a slash")
+    tab("cat src/a", "cat src/alpha.c ", "inside a directory")
+    tab("cat src/", "cat src/", "several in a directory")
+    check("choices are listed", "alpha.c" in t.out or "src/alpha.c" in t.out, t.out[-200:])
+    tab("cat tw", "cat two\\ words.txt ", "a space is escaped")
+    tab("cat two\\ w", "cat two\\ words.txt ", "after an escaped space")
+    tab("cat .se", "cat .secret ", "hidden when asked")
+    tab("cat ~/rea", "cat ~/readme.md ", "after ~")
+    tab("echo $ZQ", "echo $ZQVAR", "a variable")
+    tab("true | zzm", "true | zzmytool ", "after a pipe")
+    tab("true ; activ", "true ; activities ", "after ;")
+    tab("cat < rea", "cat < readme.md ", "after <")
+    t.send("\x15cat rea\t\x1b[H\x1b[C\x1b[C")
+    same("completion then move", t.screen()[0][p:], "cat readme.md ")
+    out = t.run("\x15zzm\t")
+    check("a completed command runs", "ran-my-tool" in out, out)
+    t.close()
+    box.close()
+
+
+def test_fuzz_keys():
+    """Random keys at the prompt. Enter and Ctrl-D are never sent, so nothing
+    typed can run and the shell cannot exit: it only has to survive."""
+    import random
+    box = Sandbox()
+    os.makedirs(box.path("sub dir"))
+    box.write("sub dir/file one", "")
+    t = Term(box, cols=40)
+    t.wait_prompt()
+    rng = random.Random(99)
+    keys = [bytes([c]) for c in range(1, 128) if c not in (3, 4, 10, 13, 26)]
+    keys += [b"\x1b[A", b"\x1b[B", b"\x1b[C", b"\x1b[D", b"\x1b[H", b"\x1b[F", b"\x1b[3~", b"\x1b[1;5C",
+             b"\x1b[99;99Z", b"\x1bb", b"\x1bf", b"\t", b"\t", b"\x12", b"\x7f", b"\x7f",
+             "é".encode(), "日本".encode(), b"\xff", b"\xc3", b"sub", b"$", b"~/", b"\\"]
+    alive = True
+    for _ in range(60):
+        data = b"".join(rng.choice(keys) for _ in range(120))
+        try:
+            os.write(t.fd, data)
+        except OSError:
+            alive = False
+            break
+        if not t.pump(0.1):
+            alive = False
+            break
+    check("20000-odd random keys", alive and "Sanitizer" not in t.out and "runtime error" not in t.out, t.out[-600:])
+    t.send("\x07\x15")
+    t.pump(0.3)
+    out = t.run("echo still-alive")
+    check("still works after them", "still-alive" in out, out)
+    t.close()
+    box.close()
+
+
 def test_syntax():
     box = Sandbox()
     for bad in ["| ls", "ls |", "ls < ", "ls > > f", "ls < > f", "; ls", "& ls", "ls && ", "|| ls",

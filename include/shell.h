@@ -138,7 +138,7 @@ int builtin_fg(int argc, char **argv);
 int builtin_bg(int argc, char **argv);
 
 /* history.c */
-void history_init(const char *fallback_dir);
+void history_init(const char *fallback_dir, int max_entries);
 void history_add(const char *line);
 int history_count(void);
 const char *history_get(int i); /* 0 is the oldest */
@@ -146,6 +146,13 @@ void history_purge(void);
 
 /* prompt.c */
 void prompt_init(void);
-void print_prompt(void);
+char *prompt_text(void); /* the caller frees it */
+
+/* edit.c */
+char *edit_line(const char *prompt);
+
+/* complete.c */
+void complete_word(const char *line, size_t pos, size_t *start, strlist_t *out);
+char *complete_unescape(const char *s, size_t n);
 
 #endif

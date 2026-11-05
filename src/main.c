@@ -8,17 +8,20 @@
 
 static void usage(const char *name)
 {
-    fprintf(stderr, "usage: %s [--strict] [-c command | script [args...]]\n", name);
+    fprintf(stderr, "usage: %s [--strict] [--no-edit] [-c command | script [args...]]\n", name);
     exit(2);
 }
 
 int main(int argc, char **argv)
 {
     const char *command = NULL, *script = NULL;
+    int no_edit = 0;
     int i = 1;
     for (; i < argc; i++) {
         if (strcmp(argv[i], "--strict") == 0) {
             strict_grammar = 1;
+        } else if (strcmp(argv[i], "--no-edit") == 0) {
+            no_edit = 1;
         } else if (strcmp(argv[i], "-c") == 0) {
             if (++i == argc)
                 usage(argv[0]);
@@ -47,7 +50,7 @@ int main(int argc, char **argv)
         return 1;
     }
     builtins_init(home);
-    history_init(home);
+    history_init(home, strict_grammar ? 15 : 1000);
     free(home);
 
     if (command != NULL || script != NULL) {
@@ -67,11 +70,27 @@ int main(int argc, char **argv)
     prompt_init();
     jobs_init();
 
+    const char *term = getenv("TERM");
+    int edit = interactive && !strict_grammar && !no_edit && term != NULL && strcmp(term, "dumb") != 0;
+
     char *line = NULL;
     size_t cap = 0;
     for (;;) {
         jobs_check();
-        print_prompt();
+        char *prompt = prompt_text();
+        if (edit) {
+            char *typed = edit_line(prompt);
+            free(prompt);
+            if (typed == NULL)
+                break; /* Ctrl-D */
+            jobs_check();
+            run_line(typed, 1);
+            free(typed);
+            continue;
+        }
+        fputs(prompt, stdout);
+        fflush(stdout);
+        free(prompt);
         errno = 0;
         if (getline(&line, &cap, stdin) < 0) {
             if (errno == EINTR && !feof(stdin)) {

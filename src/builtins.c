@@ -130,7 +130,8 @@ static int builtin_log(int argc, char **argv)
 {
     long n;
     if (argc == 1) {
-        for (int i = 0; i < history_count(); i++)
+        int n = history_count();
+        for (int i = n > 15 ? n - 15 : 0; i < n; i++)
             printf("%s\n", history_get(i));
         return 0;
     }

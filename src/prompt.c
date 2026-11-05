@@ -20,17 +20,20 @@ void prompt_init(void)
 }
 
 /* <user@host:path>, with the shell's home directory shown as ~ */
-void print_prompt(void)
+char *prompt_text(void)
 {
     const char *home = shell_home();
     size_t n = strlen(home);
     char *cwd = getcwd(NULL, 0);
-    if (cwd == NULL)
-        printf("<%s@%s:?> ", user, host);
-    else if (strncmp(cwd, home, n) == 0 && (cwd[n] == '\0' || cwd[n] == '/'))
-        printf("<%s@%s:~%s> ", user, host, cwd + n);
-    else
-        printf("<%s@%s:%s> ", user, host, cwd);
+    const char *shown = cwd ? cwd : "?";
+    const char *tilde = "";
+    if (cwd != NULL && strncmp(cwd, home, n) == 0 && (cwd[n] == '\0' || cwd[n] == '/')) {
+        shown = cwd + n;
+        tilde = "~";
+    }
+    size_t size = strlen(user) + strlen(host) + strlen(shown) + 8;
+    char *text = xrealloc(NULL, size);
+    snprintf(text, size, "<%s@%s:%s%s> ", user, host, tilde, shown);
     free(cwd);
-    fflush(stdout);
+    return text;
 }

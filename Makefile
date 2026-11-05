@@ -1,8 +1,10 @@
 CC ?= gcc
-CFLAGS = -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -Wall -Wextra -Werror \
-	-Wno-unused-parameter -fno-asm -Iinclude
+# _DEFAULT_SOURCE and _DARWIN_C_SOURCE are for one thing: TIOCGWINSZ, the
+# terminal's width, which is not in POSIX
+CFLAGS = -std=c99 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE \
+	-Wall -Wextra -Werror -Wno-unused-parameter -fno-asm -Iinclude
 SRC = src/main.c src/prompt.c src/parser.c src/executor.c src/builtins.c src/jobs.c \
-	src/history.c src/util.c src/expand.c
+	src/history.c src/util.c src/expand.c src/edit.c src/complete.c
 
 all: shell.out
 

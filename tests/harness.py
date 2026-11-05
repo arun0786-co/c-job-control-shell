@@ -77,6 +77,46 @@ def piped(box, *lines, args=(), timeout=20):
     return out, p.stderr, p.returncode
 
 
+class Screen:
+    """Just enough of a terminal to know what is on the current line and where
+    the cursor is, so a test sees what a person would see."""
+
+    def __init__(self):
+        self.line = []
+        self.col = 0
+
+    def feed(self, text):
+        i = 0
+        while i < len(text):
+            c = text[i]
+            if c == "\x1b":
+                m = re.compile(r"\x1b\[([0-9;?]*)([A-Za-z])").match(text, i)
+                if not m:
+                    i += 1
+                    continue
+                n = int(m.group(1) or 0) if m.group(1).isdigit() or not m.group(1) else 0
+                if m.group(2) == "C":
+                    self.col += n or 1
+                elif m.group(2) == "K":
+                    del self.line[self.col:]
+                i = m.end()
+                continue
+            if c == "\r":
+                self.col = 0
+            elif c == "\n":
+                self.line = []
+                self.col = 0
+            elif c >= " ":
+                while len(self.line) <= self.col:
+                    self.line.append(" ")
+                self.line[self.col] = c
+                self.col += 1
+            i += 1
+
+    def text(self):
+        return "".join(self.line)
+
+
 class Term:
     """The shell on a real terminal, so that Ctrl-C and Ctrl-Z are the
     terminal's own signals."""
@@ -150,6 +190,13 @@ class Term:
     def since(self):
         text = ESCAPE.sub("", self.out[self.mark:]).replace("\r", "")
         return PROMPT.sub("", text)
+
+    def screen(self, settle=0.15):
+        """Text of the line being edited, and the cursor's place in it."""
+        self.pump(settle)
+        s = Screen()
+        s.feed(self.out)
+        return s.text(), s.col
 
     def close(self):
         try:

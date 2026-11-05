@@ -4,12 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* the last 15 commands, oldest first, mirrored to ~/.shell_history after
-   every change so they survive a restart */
+/* the last commands, oldest first, mirrored to ~/.shell_history after every
+   change so they survive a restart. log shows only 15 of them; the line editor
+   can reach them all. */
 
-#define HISTORY_MAX 15
-
-static char *entries[HISTORY_MAX];
+static char **entries;
+static int limit;
 static int count;
 static char *path;
 
@@ -17,9 +17,9 @@ static void push(const char *line)
 {
     if (count > 0 && strcmp(entries[count - 1], line) == 0)
         return;
-    if (count == HISTORY_MAX) {
+    if (count == limit) {
         free(entries[0]);
-        memmove(entries, entries + 1, (HISTORY_MAX - 1) * sizeof *entries);
+        memmove(entries, entries + 1, (size_t)(limit - 1) * sizeof *entries);
         count--;
     }
     entries[count++] = xstrdup(line);
@@ -35,8 +35,10 @@ static void save(void)
     fclose(f);
 }
 
-void history_init(const char *fallback_dir)
+void history_init(const char *fallback_dir, int max_entries)
 {
+    limit = max_entries;
+    entries = xrealloc(NULL, (size_t)limit * sizeof *entries);
     const char *dir = getenv("HOME");
     if (dir == NULL || dir[0] == '\0')
         dir = fallback_dir;
