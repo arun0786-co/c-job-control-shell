@@ -74,6 +74,7 @@ typedef struct {
 } job_t;
 
 extern int interactive;
+extern int in_child_shell; /* this process is a forked copy of the shell */
 void jobs_init(void);
 job_t *job_new(const char *text, int ncmds);
 void job_free(job_t *job);

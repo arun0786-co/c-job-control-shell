@@ -18,6 +18,7 @@
  */
 
 int interactive;
+int in_child_shell;
 static pid_t shell_pgid;
 static volatile sig_atomic_t fg_pgid; /* foreground job's group, 0 if none */
 static job_t **jobs;
@@ -196,6 +197,11 @@ void jobs_check(void)
 
 void jobs_kill_all(void)
 {
+    /* A builtin in a pipe runs in a forked copy of the shell. The copy has the
+       job list, but the jobs are its siblings: waitpid fails with ECHILD, which
+       below means "all gone". Only the real shell may decide that. */
+    if (in_child_shell)
+        return;
     for (int i = 0; i < njobs; i++) {
         kill(-jobs[i]->pgid, SIGKILL);
         job_free(jobs[i]);
@@ -256,6 +262,10 @@ static job_t *job_from_args(int argc, char **argv)
 
 int builtin_fg(int argc, char **argv)
 {
+    if (in_child_shell) {
+        fprintf(stderr, "bg: no job control in a pipe or background group\n");
+        return 1;
+    }
     job_t *job = job_from_args(argc, argv);
     if (job == NULL) {
         fprintf(stderr, "No such job\n");
@@ -274,6 +284,10 @@ int builtin_fg(int argc, char **argv)
 
 int builtin_bg(int argc, char **argv)
 {
+    if (in_child_shell) {
+        fprintf(stderr, "fg: no job control in a pipe or background group\n");
+        return 1;
+    }
     job_t *job = job_from_args(argc, argv);
     if (job == NULL) {
         fprintf(stderr, "No such job\n");

@@ -109,6 +109,7 @@ static void exec_command(const command_t *cmd, int in_fd, int out_fd, pid_t pgid
     builtin_fn fn = find_builtin(cmd->argv[0]);
     if (fn != NULL) {
         interactive = 0; /* this copy of the shell does not own the terminal */
+        in_child_shell = 1;
         int status = fn(cmd->argc, cmd->argv);
         fflush(stdout);
         _exit(status);

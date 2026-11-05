@@ -113,6 +113,9 @@ def test_jobs_piped():
     same("activities in a pipe shows live jobs", len(runs), 2)
     check("a pipe does not report a live job as finished", "exited" not in out, out)
 
+    out, err, _ = piped(box, "sleep 30 &", "fg | cat", "activities")
+    check("fg refuses in a pipe", "no job control" in err and "sleep 30 - Running" in out, (out, err))
+
     out, err, _ = piped(box, "sleep 30 &", "ping 999999 9")
     same("ping missing", err, "No such process found\n")
     same("ping bad", piped(box, "ping 1 abc")[1], "Invalid syntax!\n")
