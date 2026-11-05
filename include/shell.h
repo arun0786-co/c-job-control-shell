@@ -70,6 +70,7 @@ typedef struct {
 
 /* expand.c */
 extern int substitution_ran; /* a $(...) ran since this was last cleared */
+extern strlist_t script_args;  /* $0 is items[0], $1 is items[1] and so on */
 void strlist_push(strlist_t *list, const char *s);
 void strlist_free(strlist_t *list);
 void expand_command(const command_t *cmd, command_t *out);
@@ -88,13 +89,17 @@ void free_shell_cmd(shell_cmd_t *sc);
 extern pid_t shell_pid;           /* $$, the same in every forked copy */
 extern pid_t last_background_pid; /* $! */
 void run_line(const char *line, int store_in_history);
+int run_file(const char *path);
+void shell_exit(int status);
 int apply_redirections(const command_t *cmd);
 void enter_subshell(pid_t pgid);
+void enter_batch_mode(void);
 
 /* builtins.c */
 typedef int (*builtin_fn)(int argc, char **argv);
 void builtins_init(const char *home);
 builtin_fn find_builtin(const char *name);
+const char *builtin_name(int i); /* for completion; NULL past the last */
 const char *shell_home(void);
 
 /* jobs.c */
@@ -113,6 +118,7 @@ typedef struct {
 
 extern int interactive;
 extern int in_child_shell; /* this process is a forked copy of the shell */
+extern int quiet_jobs;     /* do not announce finished jobs: for scripts */
 void jobs_init(void);
 job_t *job_new(const char *text, int ncmds);
 void job_free(job_t *job);

@@ -17,6 +17,53 @@ pid_t last_background_pid;
 /* a forked copy of the shell puts what it runs in this group, not in new ones */
 static pid_t subshell_pgid;
 
+/* A script runs like a plain program. It has no job control: what it runs stays
+   in its own process group, so Ctrl-C reaches both, and that also lets a
+   command in the script read the terminal. */
+void enter_batch_mode(void)
+{
+    interactive = 0;
+    quiet_jobs = 1;
+    subshell_pgid = getpgrp();
+}
+
+/* leave the shell, taking its jobs with it if a person was using it */
+void shell_exit(int status)
+{
+    fflush(stdout);
+    if (in_child_shell)
+        _exit(status);
+    if (!quiet_jobs)
+        jobs_kill_all();
+    exit(status);
+}
+
+/* each line runs as if typed, but is not stored. returns the last status */
+int run_file(const char *path)
+{
+    static int depth;
+    if (depth >= 64) {
+        fprintf(stderr, "%s: too many nested files\n", path);
+        return 1;
+    }
+    FILE *f = fopen(path, "r");
+    if (f == NULL) {
+        fprintf(stderr, "%s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    depth++;
+    char *line = NULL;
+    size_t cap = 0;
+    while (getline(&line, &cap, f) >= 0) {
+        jobs_check();
+        run_line(line, 0);
+    }
+    free(line);
+    fclose(f);
+    depth--;
+    return last_status;
+}
+
 /* this process is now a forked copy of the shell, doing work for the real one.
    what it runs goes into the group pgid. */
 void enter_subshell(pid_t pgid)
@@ -160,7 +207,9 @@ static void exec_command(const command_t *cmd, int in_fd, int out_fd, pid_t pgid
 static job_t *launch(const group_t *g)
 {
     job_t *job = job_new(g->text, g->ncmds);
-    job->pgid = subshell_pgid;
+    /* a background job always has a group of its own, or waiting for what runs
+       in the foreground would also collect it */
+    job->pgid = g->background ? 0 : subshell_pgid;
     int in_fd = STDIN_FILENO;
     for (int i = 0; i < g->ncmds; i++) {
         int pfd[2] = { -1, -1 };

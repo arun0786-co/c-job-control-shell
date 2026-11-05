@@ -20,6 +20,7 @@
 
 int interactive;
 int in_child_shell;
+int quiet_jobs;
 static pid_t shell_pgid;
 static struct termios shell_modes;
 static volatile sig_atomic_t fg_pgid; /* foreground job's group, 0 if none */
@@ -223,8 +224,9 @@ void jobs_check(void)
         }
         if (job->live == 0) {
             int ok = WIFEXITED(job->last_status) && WEXITSTATUS(job->last_status) == 0;
-            printf("%s with pid %d exited %s\n", job->text, (int)job->pgid,
-                   ok ? "normally" : "abnormally");
+            if (!quiet_jobs)
+                printf("%s with pid %d exited %s\n", job->text, (int)job->pgid,
+                       ok ? "normally" : "abnormally");
             job_remove(job);
             job_free(job);
             i--;

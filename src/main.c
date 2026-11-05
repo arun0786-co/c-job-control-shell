@@ -6,16 +6,35 @@
 #include <string.h>
 #include <unistd.h>
 
+static void usage(const char *name)
+{
+    fprintf(stderr, "usage: %s [--strict] [-c command | script [args...]]\n", name);
+    exit(2);
+}
+
 int main(int argc, char **argv)
 {
-    for (int i = 1; i < argc; i++) {
+    const char *command = NULL, *script = NULL;
+    int i = 1;
+    for (; i < argc; i++) {
         if (strcmp(argv[i], "--strict") == 0) {
             strict_grammar = 1;
+        } else if (strcmp(argv[i], "-c") == 0) {
+            if (++i == argc)
+                usage(argv[0]);
+            command = argv[i];
+            i++;
+            break;
+        } else if (argv[i][0] == '-' && argv[i][1] != '\0') {
+            usage(argv[0]);
         } else {
-            fprintf(stderr, "usage: %s [--strict]\n", argv[0]);
-            return 2;
+            script = argv[i];
+            break;
         }
     }
+    /* $0 and up: the script's name and its arguments */
+    for (int k = script ? i : (command ? i : argc); k < argc; k++)
+        strlist_push(&script_args, argv[k]);
 
     /* line buffering even when stdout is a pipe, so the shell's output and
        its children's output come out in order */
@@ -30,6 +49,21 @@ int main(int argc, char **argv)
     builtins_init(home);
     history_init(home);
     free(home);
+
+    if (command != NULL || script != NULL) {
+        enter_batch_mode();
+        if (command != NULL)
+            run_line(command, 0);
+        else if (access(script, R_OK) != 0) {
+            perror(script);
+            return 127;
+        } else {
+            run_file(script);
+        }
+        fflush(stdout);
+        return last_status;
+    }
+
     prompt_init();
     jobs_init();
 

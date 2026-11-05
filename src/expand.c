@@ -19,6 +19,7 @@
  */
 
 int substitution_ran;
+strlist_t script_args;
 
 typedef struct {
     char *text;
@@ -190,6 +191,29 @@ static size_t expand_dollar(const char *w, size_t i, field_t *f, strlist_t *out,
         put_value(f, out, num, 1, 0, use_glob);
         return j + 1;
     }
+    if (w[j] >= '0' && w[j] <= '9') {
+        int n = w[j] - '0';
+        if (n < script_args.n)
+            put_value(f, out, script_args.items[n], quoted, split, use_glob);
+        return j + 1;
+    }
+    if (w[j] == '#') {
+        snprintf(num, sizeof num, "%d", script_args.n > 0 ? script_args.n - 1 : 0);
+        put_value(f, out, num, 1, 0, use_glob);
+        return j + 1;
+    }
+    if (w[j] == '@') {
+        /* "$@" keeps each argument whole; it is the one quoted thing that makes
+           several fields */
+        for (int n = 1; n < script_args.n; n++) {
+            if (n > 1 && (quoted || split))
+                end_field(f, out, use_glob);
+            if (quoted)
+                f->started = 1;
+            put_value(f, out, script_args.items[n], quoted, split, use_glob);
+        }
+        return j + 1;
+    }
     if (w[j] == '$') {
         snprintf(num, sizeof num, "%d", (int)shell_pid);
         put_value(f, out, num, 1, 0, use_glob);
@@ -273,7 +297,7 @@ static void expand_word(const char *w, strlist_t *out, int split_and_glob)
                     put(&f, w[i + 1], 1);
                     i += 2;
                 } else if (w[i] == '$') {
-                    i = expand_dollar(w, i, &f, out, 1, 0, 0);
+                    i = expand_dollar(w, i, &f, out, 1, split_and_glob, 0);
                 } else {
                     put(&f, w[i++], 1);
                 }
