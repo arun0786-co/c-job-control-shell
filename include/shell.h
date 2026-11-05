@@ -29,6 +29,8 @@ typedef struct {
     int argc;
     redir_t *redirs;
     int nredirs;
+    char **assigns; /* NAME=value settings in front of the command */
+    int nassigns;
 } command_t;
 
 typedef enum { RUN_ALWAYS, RUN_IF_OK, RUN_IF_FAILED } run_if_t;
@@ -58,15 +60,34 @@ char *xstrdup(const char *s);
 char *xstrndup(const char *s, size_t n);
 int parse_number(const char *s, long *out);
 
+/* a NULL-terminated list of strings */
+typedef struct {
+    char **items;
+    int n;
+} strlist_t;
+
+/* expand.c */
+extern int substitution_ran; /* a $(...) ran since this was last cleared */
+void strlist_push(strlist_t *list, const char *s);
+void strlist_free(strlist_t *list);
+void expand_command(const command_t *cmd, command_t *out);
+void free_command(command_t *cmd);
+
 /* parser.c */
+/* from a quote, a backslash or $( at s[i], returns the position just past its
+   end, or (size_t)-1 if it never ends. any other character is just itself. */
+size_t skip_quoted(const char *s, size_t i);
 /* returns 1 and sets *out on success, 0 for a blank line, -1 on a syntax
    error */
 int parse_line(const char *line, shell_cmd_t **out);
 void free_shell_cmd(shell_cmd_t *sc);
 
 /* executor.c */
+extern pid_t shell_pid;           /* $$, the same in every forked copy */
+extern pid_t last_background_pid; /* $! */
 void run_line(const char *line, int store_in_history);
 int apply_redirections(const command_t *cmd);
+void enter_subshell(pid_t pgid);
 
 /* builtins.c */
 typedef int (*builtin_fn)(int argc, char **argv);

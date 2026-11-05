@@ -23,11 +23,87 @@ typedef struct {
     token_t *toks;
     int ntoks;
     int pos;
+    int open_quote;
 } parser_t;
 
 static int is_operator(char c)
 {
     return c == '|' || c == '&' || c == ';' || c == '<' || c == '>';
+}
+
+#define NO_END ((size_t)-1)
+
+static size_t skip_substitution(const char *s, size_t i)
+{
+    /* s[i] is just past the $( */
+    int depth = 1;
+    while (s[i] != '\0') {
+        if (s[i] == '(') {
+            depth++;
+            i++;
+        } else if (s[i] == ')') {
+            i++;
+            if (--depth == 0)
+                return i;
+        } else {
+            i = skip_quoted(s, i);
+            if (i == NO_END)
+                return NO_END;
+        }
+    }
+    return NO_END;
+}
+
+size_t skip_quoted(const char *s, size_t i)
+{
+    switch (s[i]) {
+    case '\\':
+        return s[i + 1] != '\0' ? i + 2 : i + 1;
+    case '\'':
+        for (i++; s[i] != '\''; i++)
+            if (s[i] == '\0')
+                return NO_END;
+        return i + 1;
+    case '"':
+        for (i++; s[i] != '"';) {
+            if (s[i] == '\0') {
+                return NO_END;
+            } else if (s[i] == '\\' && s[i + 1] != '\0') {
+                i += 2;
+            } else if (s[i] == '$' && s[i + 1] == '(') {
+                i = skip_substitution(s, i + 2);
+                if (i == NO_END)
+                    return NO_END;
+            } else {
+                i++;
+            }
+        }
+        return i + 1;
+    case '$':
+        if (s[i + 1] == '(')
+            return skip_substitution(s, i + 2);
+        if (s[i + 1] == '{') {
+            for (i += 2; s[i] != '}'; i++)
+                if (s[i] == '\0')
+                    return NO_END;
+            return i + 1;
+        }
+        return i + 1;
+    default:
+        return i + 1;
+    }
+}
+
+/* returns the position just past the word at s[i], or NO_END if a quote in it
+   is left open */
+static size_t scan_word(const char *s, size_t i)
+{
+    while (s[i] != '\0' && !isspace((unsigned char)s[i]) && !is_operator(s[i])) {
+        i = strict_grammar ? i + 1 : skip_quoted(s, i);
+        if (i == NO_END)
+            return NO_END;
+    }
+    return i;
 }
 
 static void tokenize(parser_t *p)
@@ -40,6 +116,13 @@ static void tokenize(parser_t *p)
         token_t t = { T_END, i, i };
         switch (s[i]) {
         case '\0':
+            break;
+        case '#':
+            if (strict_grammar)
+                goto word;
+            while (s[i] != '\0') /* a comment runs to the end of the line */
+                i++;
+            t.start = i;
             break;
         case '|':
             if (s[i + 1] == '|' && !strict_grammar) {
@@ -71,9 +154,13 @@ static void tokenize(parser_t *p)
             }
             break;
         default:
+        word:
             t.type = T_NAME;
-            while (s[i] != '\0' && !isspace((unsigned char)s[i]) && !is_operator(s[i]))
-                i++;
+            i = scan_word(s, i);
+            if (i == NO_END) {
+                p->open_quote = 1;
+                i = strlen(s);
+            }
         }
         t.end = i;
         p->toks = xrealloc(p->toks, (p->ntoks + 1) * sizeof *p->toks);
@@ -177,8 +264,12 @@ static int parse_shell_cmd(parser_t *p, shell_cmd_t *sc)
 
 int parse_line(const char *line, shell_cmd_t **out)
 {
-    parser_t p = { line, NULL, 0, 0 };
+    parser_t p = { line, NULL, 0, 0, 0 };
     tokenize(&p);
+    if (p.open_quote) {
+        free(p.toks);
+        return -1;
+    }
     if (p.toks[0].type == T_END) {
         free(p.toks);
         return 0;
@@ -200,15 +291,8 @@ void free_shell_cmd(shell_cmd_t *sc)
 {
     for (int i = 0; i < sc->ngroups; i++) {
         group_t *g = &sc->groups[i];
-        for (int j = 0; j < g->ncmds; j++) {
-            command_t *cmd = &g->cmds[j];
-            for (int k = 0; k < cmd->argc; k++)
-                free(cmd->argv[k]);
-            free(cmd->argv);
-            for (int k = 0; k < cmd->nredirs; k++)
-                free(cmd->redirs[k].file);
-            free(cmd->redirs);
-        }
+        for (int j = 0; j < g->ncmds; j++)
+            free_command(&g->cmds[j]);
         free(g->cmds);
         free(g->text);
     }

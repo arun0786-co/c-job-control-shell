@@ -21,6 +21,7 @@ int main(int argc, char **argv)
        its children's output come out in order */
     setvbuf(stdout, NULL, _IOLBF, 0);
 
+    shell_pid = getpid();
     char *home = getcwd(NULL, 0);
     if (home == NULL) {
         perror("getcwd");

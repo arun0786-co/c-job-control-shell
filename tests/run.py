@@ -36,6 +36,118 @@ def test_strict():
     for bad in ["ls ; ", "echo a && echo b", "echo a || echo b"]:
         same(f"strict rejects {bad!r}", piped(box, bad, **strict)[1], "Invalid Syntax!\n")
     same("strict allows a final &", piped(box, "true &", **strict)[1], "")
+    same("strict: quotes are plain", piped(box, 'echo "a  b"', **strict)[0], '"a b"\n')
+    same("strict: $ is plain", piped(box, "echo $HOME", **strict)[0], "$HOME\n")
+    same("strict: * is plain", piped(box, "echo *", **strict)[0], "*\n")
+    same("strict: # is plain", piped(box, "echo #x", **strict)[0], "#x\n")
+    same("strict: = is plain", piped(box, "A=1", **strict)[1], "Command not found!\n")
+    box.close()
+
+
+def test_quoting():
+    box = Sandbox()
+    box.write("args.py", "import sys\nfor a in sys.argv[1:]:\n    print('[' + a + ']')\n")
+    def args(line):
+        return piped(box, "python3 args.py " + line)[0]
+    same("double quotes keep spaces", args('"a  b" c'), "[a  b]\n[c]\n")
+    same("single quotes keep spaces", args("'a  b' c"), "[a  b]\n[c]\n")
+    same("backslash keeps a space", args("a\\ b c"), "[a b]\n[c]\n")
+    same("quotes join", args('a"b"\'c\'d'), "[abcd]\n")
+    same("empty quotes are an argument", args('"" x \'\''), "[]\n[x]\n[]\n")
+    same("operators in quotes are plain", args("'a|b;c&d>e'"), "[a|b;c&d>e]\n")
+    same("backslash in double quotes", args(r'"a\"b\\c\$d\e"'), '[a"b\\c$d\\e]\n')
+    same("single quotes hide all", args("'$HOME \\ \"'"), '[$HOME \\ "]\n')
+    for bad in ['echo "a', "echo 'a", "echo $(a", 'echo "$(a"']:
+        same(f"open quote {bad!r}", piped(box, bad)[1], "Invalid Syntax!\n")
+    same("comment", piped(box, "echo a # b ; echo c")[0], "a\n")
+    same("a # in a word is plain", piped(box, "echo a#b")[0], "a#b\n")
+    same("a quoted # is plain", piped(box, "echo '#b'")[0], "#b\n")
+    same("a comment alone", piped(box, "# nothing", "echo x")[0], "x\n")
+    box.close()
+
+
+def test_expansion():
+    box = Sandbox()
+    box.write("args.py", "import sys\nfor a in sys.argv[1:]:\n    print('[' + a + ']')\n")
+    box.write("x1.c", ""); box.write("x2.c", ""); box.write("y.h", ""); box.write(".hide.c", "")
+    def args(*lines):
+        return piped(box, *lines[:-1], "python3 args.py " + lines[-1])[0]
+    same("variable", args("A=hello", "$A"), "[hello]\n")
+    same("braces", args("A=hello", "${A}x"), "[hellox]\n")
+    same("unset is nothing", args("$NOPE"), "")
+    same("unset in quotes is empty", args('"$NOPE"'), "[]\n")
+    same("unquoted splits", args("A='a  b'", "$A"), "[a]\n[b]\n")
+    same("quoted does not split", args("A='a  b'", '"$A"'), "[a  b]\n")
+    same("split joins with what is beside it", args("A='a b'", "x${A}y"), "[xa]\n[by]\n")
+    same("assignment does not split", args("A='a b'", "B=$A", '"$B"'), "[a b]\n")
+    same("a lone $", args("$ a$"), "[$]\n[a$]\n")
+    same("$?", piped(box, "false", "echo $?", "true", "echo $?")[0], "1\n0\n")
+    same("$? after not found", piped(box, "no_such_x", "echo $?")[0], "127\n")
+    same("$? after syntax", piped(box, "| a", "echo $?")[0], "2\n")
+    same("$? is read when it runs", piped(box, "false ; echo $?")[0], "1\n")
+    out = piped(box, "echo $$ $(echo $$)")[0].split()
+    check("$$ is the same in a substitution", len(out) == 2 and out[0] == out[1] and out[0].isdigit(), out)
+    same("a setting succeeds", piped(box, "false", "A=1", "echo $?")[0], "0\n")
+    same("a setting can read the old $?", piped(box, "false", "A=$?", "echo $A")[0], "1\n")
+    same("a substitution alone gives its status", piped(box, "$(false)", "echo $?")[0], "1\n")
+    out = piped(box, "sleep 0 &", "echo $!")[0]
+    check("$! is the last job", re.search(r"\[1\] (\d+)\n\1\n", out), out)
+    same("substitution", args("$(echo hi)"), "[hi]\n")
+    same("substitution splits", args("$(echo a b)"), "[a]\n[b]\n")
+    same("quoted substitution does not", args('"$(echo a b)"'), "[a b]\n")
+    same("trailing newlines go", args('"$(printf a; echo; echo)"'), "[a]\n")
+    same("nested", args('$(echo $(echo deep))'), "[deep]\n")
+    same("with a pipe", args("$(echo hi | tr a-z A-Z)"), "[HI]\n")
+    same("with parens in quotes", args("$(echo ')')"), "[)]\n")
+    same("its status", piped(box, "X=$(false)", "echo $?")[0], "1\n")
+    same("it sees this shell's vars", args("A=7", "$(echo $A)"), "[7]\n")
+    same("settings in it stay in it", args("$(A=8)", '"$A"'), "[]\n")
+    same("* matches", args("*.c"), "[x1.c]\n[x2.c]\n")
+    same("? matches", args("x?.c"), "[x1.c]\n[x2.c]\n")
+    same("[] matches", args("x[2].c"), "[x2.c]\n")
+    same("no match stays", args("*.zzz"), "[*.zzz]\n")
+    same("quoted * stays", args('"*.c"'), "[*.c]\n")
+    same("escaped * stays", args("\\*.c"), "[*.c]\n")
+    same("no glob on quoted part", args('x"?".c'), "[x?.c]\n")
+    same("variable globs", args("A='*.h'", "$A"), "[y.h]\n")
+    same("~", args("~"), f"[{box.dir}]\n")
+    same("~/x", args("~/x"), f"[{box.dir}/x]\n")
+    same("~x stays", args("~x"), "[~x]\n")
+    same("quoted ~ stays", args("'~'"), "[~]\n")
+    same("setting for one command", piped(box, "A=1", "A=2 printenv A", "echo $A")[0], "2\n1\n")
+    same("settings reach a pipeline", piped(box, "A=2 printenv A | cat")[0], "2\n")
+    same("an empty command is fine", piped(box, "$NOPE", "echo $?")[0], "0\n")
+    piped(box, "F=made.txt", "echo x > $F")
+    same("redirect to a variable", box.read("made.txt"), "x\n")
+    piped(box, "F='a file'", 'echo x > "$F"')
+    same("redirect to a name with a space", box.read("a file"), "x\n")
+    piped(box, "$NOPE > empty.txt")
+    same("redirect with no command", box.read("empty.txt"), "")
+    same("job text is as typed", re.findall(r": (.*) - Running", piped(box, 'sleep 30 "$NOPE" &', "activities")[0])[0:1], ['sleep 30 "$NOPE"'])
+    same("many fields", piped(box, "A=$(seq 1 3000)", "echo $A | wc -w")[0].strip(), "3000")
+    for odd in ['echo "${a"', 'echo "${a"b"}"', "echo ${a", "echo '${a'", 'echo "$(echo "x")"', 'echo \\', 'echo "\\']:
+        out, err, code = piped(box, odd, "echo still here")
+        check(f"survives {odd!r}", code == 0 and "still here" in out and "Sanitizer" not in err, (out, err))
+    box.close()
+
+
+def test_fuzz_words():
+    """Random lines must neither crash the shell nor hang it. Commands are only
+    ever a or b, which do not exist, and the cwd is a scratch directory."""
+    import random
+    box = Sandbox()
+    rng = random.Random(1234)
+    pieces = list("ab ") + ['"', "'", "\\", "$", "(", ")", "{", "}", "*", "?", "[", "]", "#", ";", "|", "&",
+                            "<", ">", "~", "=", "$(", "${", "&&", "||", ">>", "$?", "$$"]
+    lines = ["".join(rng.choice(pieces) for _ in range(rng.randint(1, 14))) for _ in range(1500)]
+    for start in range(0, len(lines), 50):
+        part = lines[start:start + 50]
+        out, err, code = piped(box, *part, "echo end-of-batch", timeout=60)
+        if code != 0 or "end-of-batch" not in out or "Sanitizer" in err or "runtime error" in err:
+            check("random lines", False, (part, code, err[-500:]))
+            break
+    else:
+        check("1500 random lines", True)
     box.close()
 
 

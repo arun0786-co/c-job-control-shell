@@ -11,9 +11,23 @@
 
 int strict_grammar;
 int last_status;
+pid_t shell_pid;
+pid_t last_background_pid;
 
 /* a forked copy of the shell puts what it runs in this group, not in new ones */
 static pid_t subshell_pgid;
+
+/* this process is now a forked copy of the shell, doing work for the real one.
+   what it runs goes into the group pgid. */
+void enter_subshell(pid_t pgid)
+{
+    reset_child_signals();
+    interactive = 0;
+    in_child_shell = 1;
+    subshell_pgid = pgid;
+}
+
+static int run_expanded_group(const group_t *g);
 
 /* lines that run log anywhere are not stored in the history */
 static int mentions_log(const shell_cmd_t *sc)
@@ -76,7 +90,7 @@ static int run_builtin_here(const command_t *cmd, builtin_fn fn)
     int saved_in = dup(STDIN_FILENO);
     int saved_out = dup(STDOUT_FILENO);
     if (apply_redirections(cmd) == 0) {
-        status = fn(cmd->argc, cmd->argv);
+        status = fn != NULL ? fn(cmd->argc, cmd->argv) : 0;
         fflush(stdout);
     }
     dup2(saved_in, STDIN_FILENO);
@@ -114,6 +128,10 @@ static void exec_command(const command_t *cmd, int in_fd, int out_fd, pid_t pgid
     }
     if (apply_redirections(cmd) < 0)
         _exit(1);
+    for (int i = 0; i < cmd->nassigns; i++)
+        putenv(cmd->assigns[i]);
+    if (cmd->argc == 0)
+        _exit(0); /* a word that expanded to nothing, or only settings */
 
     builtin_fn fn = find_builtin(cmd->argv[0]);
     if (fn != NULL) {
@@ -183,11 +201,76 @@ static job_t *launch(const group_t *g)
     return job;
 }
 
-static int run_group(const group_t *g)
+/* NAME=value on its own, with no command: applies to the shell from now on */
+static int run_settings_here(const command_t *cmd)
 {
-    builtin_fn fn = g->ncmds == 1 ? find_builtin(g->cmds[0].argv[0]) : NULL;
+    for (int i = 0; i < cmd->nassigns; i++) {
+        char *eq = strchr(cmd->assigns[i], '=');
+        char *name = xstrndup(cmd->assigns[i], (size_t)(eq - cmd->assigns[i]));
+        setenv(name, eq + 1, 1);
+        free(name);
+    }
+    /* x=$(false) gives the status of what ran inside it, and x=1 gives 0 */
+    return substitution_ran ? last_status : 0;
+}
+
+/* runs a builtin in this shell with settings that last for that command only */
+static int run_builtin_with_settings(const command_t *cmd, builtin_fn fn)
+{
+    char **old = NULL;
+    if (cmd->nassigns > 0) {
+        old = xrealloc(NULL, (size_t)cmd->nassigns * sizeof *old);
+        for (int i = 0; i < cmd->nassigns; i++) {
+            char *eq = strchr(cmd->assigns[i], '=');
+            char *name = xstrndup(cmd->assigns[i], (size_t)(eq - cmd->assigns[i]));
+            const char *value = getenv(name);
+            old[i] = value ? xstrdup(value) : NULL;
+            setenv(name, eq + 1, 1);
+            free(name);
+        }
+    }
+    int status = run_builtin_here(cmd, fn);
+    for (int i = 0; i < cmd->nassigns; i++) {
+        char *eq = strchr(cmd->assigns[i], '=');
+        char *name = xstrndup(cmd->assigns[i], (size_t)(eq - cmd->assigns[i]));
+        if (old[i] != NULL)
+            setenv(name, old[i], 1);
+        else
+            unsetenv(name);
+        free(old[i]);
+        free(name);
+    }
+    free(old);
+    return status;
+}
+
+/* words are expanded here, just before running, and in the shell itself, so
+   that a $(...) in any command of a pipeline is finished before it starts */
+static int run_group(const group_t *raw)
+{
+    group_t expanded = *raw;
+    group_t *g = &expanded;
+    g->cmds = xrealloc(NULL, (size_t)raw->ncmds * sizeof *g->cmds);
+    substitution_ran = 0;
+    for (int i = 0; i < raw->ncmds; i++)
+        expand_command(&raw->cmds[i], &g->cmds[i]);
+    int status = run_expanded_group(g);
+    for (int i = 0; i < g->ncmds; i++)
+        free_command(&g->cmds[i]);
+    free(g->cmds);
+    return status;
+}
+
+static int run_expanded_group(const group_t *g)
+{
+    if (g->ncmds == 1 && !g->background && g->cmds[0].argc == 0) {
+        /* no command is left, but redirections still create their files */
+        int status = run_builtin_here(&g->cmds[0], NULL);
+        return status != 0 ? status : run_settings_here(&g->cmds[0]);
+    }
+    builtin_fn fn = g->ncmds == 1 && g->cmds[0].argc > 0 ? find_builtin(g->cmds[0].argv[0]) : NULL;
     if (fn != NULL && !g->background)
-        return run_builtin_here(&g->cmds[0], fn);
+        return run_builtin_with_settings(&g->cmds[0], fn);
     job_t *job = launch(g);
     if (job->npids == 0) {
         job_free(job);
@@ -195,6 +278,7 @@ static int run_group(const group_t *g)
     }
     if (g->background) {
         job_add(job);
+        last_background_pid = job->pgid;
         printf("[%d] %d\n", job->number, (int)job->pgid);
         return 0;
     }
@@ -243,7 +327,6 @@ static void run_and_or_background(const shell_cmd_t *sc, int first, int last)
     }
     if (pid == 0) {
         setpgid(0, 0);
-        reset_child_signals();
         if (!interactive) {
             int fd = open("/dev/null", O_RDONLY);
             if (fd >= 0) {
@@ -251,9 +334,7 @@ static void run_and_or_background(const shell_cmd_t *sc, int first, int last)
                 close(fd);
             }
         }
-        interactive = 0;
-        in_child_shell = 1;
-        subshell_pgid = getpid();
+        enter_subshell(getpid());
         /* the last group's background flag is what brought us here */
         shell_cmd_t copy = *sc;
         group_t *groups = xrealloc(NULL, (size_t)sc->ngroups * sizeof *groups);
@@ -266,6 +347,7 @@ static void run_and_or_background(const shell_cmd_t *sc, int first, int last)
     }
     setpgid(pid, pid);
     job_start_background(job, pid);
+    last_background_pid = pid;
     printf("[%d] %d\n", job->number, (int)job->pgid);
     last_status = 0;
 }
